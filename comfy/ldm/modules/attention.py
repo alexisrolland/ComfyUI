@@ -416,7 +416,8 @@ except:
     pass
 
 @wrap_attn
-def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, var_length=False, **kwargs):
+def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    var_length = kwargs.get("var_length", False)
     b = q.shape[0]
     dim_head = q.shape[-1]
     # check to make sure xformers isn't broken
@@ -506,7 +507,8 @@ else:
     SDP_BATCH_LIMIT = 2**31
 
 @wrap_attn
-def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, var_length=False, **kwargs):
+def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    var_length = kwargs.get("var_length", False)
     if var_length:
         cu_seqlens_q, cu_seqlens_k, _, _ = var_attn_arg(kwargs)
         if not skip_reshape:
@@ -570,7 +572,8 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
     return out
 
 @wrap_attn
-def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, var_length = False, **kwargs):
+def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    var_length = kwargs.get("var_length", False)
     exception_fallback = False
     if var_length:
         if not skip_reshape:
@@ -656,7 +659,8 @@ except AttributeError as error:
         assert False, f"Could not define flash_attn_wrapper: {FLASH_ATTN_ERROR}"
 
 @wrap_attn
-def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, var_length=False, **kwargs):
+def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    var_length = kwargs.get("var_length", False)
     if var_length:
         cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k = var_attn_arg(kwargs)
         return flash_attn_varlen_func(

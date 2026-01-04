@@ -13,6 +13,7 @@ from comfy.rmsnorm import RMSNorm
 from torch.nn.modules.utils import _triple
 from torch import nn
 import math
+from comfy.ldm.flux.math import apply_rope1
 
 class Cache:
     def __init__(self, disable=False, prefix="", cache=None):
@@ -443,7 +444,6 @@ def apply_rotary_emb(
     freqs_seq_dim = None
 ):
     dtype = t.dtype
-
     if not exists(freqs_seq_dim):
         if freqs.ndim == 2 or t.ndim == 3:
             freqs_seq_dim = 0
@@ -452,20 +452,23 @@ def apply_rotary_emb(
         seq_len = t.shape[seq_dim]
         freqs = slice_at_dim(freqs, slice(-seq_len, None), dim = freqs_seq_dim)
 
-    rot_dim = freqs.shape[-1]
-    end_index = start_index + rot_dim
-
-    assert rot_dim <= t.shape[-1], f'feature dimension {t.shape[-1]} is not of sufficient size to rotate in all the positions {rot_dim}'
+    rot_feats = freqs.shape[-1]
+    end_index = start_index + rot_feats
 
     t_left = t[..., :start_index]
     t_middle = t[..., start_index:end_index]
     t_right = t[..., end_index:]
 
-    freqs = freqs.to(t_middle.device)
-    t_transformed = (t_middle * freqs.cos() * scale) + (rotate_half(t_middle) * freqs.sin() * scale)
+    angles = freqs.to(t_middle.device)[..., ::2]
+    cos = torch.cos(angles) * scale
+    sin = torch.sin(angles) * scale
 
-    out = torch.cat((t_left, t_transformed, t_right), dim=-1)
+    col0 = torch.stack([cos, sin], dim=-1)
+    col1 = torch.stack([-sin, cos], dim=-1)
+    freqs_mat = torch.stack([col0, col1], dim=-1)
 
+    t_middle_out = apply_rope1(t_middle, freqs_mat)
+    out = torch.cat((t_left, t_middle_out, t_right), dim=-1)
     return out.type(dtype)
 
 class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):

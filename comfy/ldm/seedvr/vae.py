@@ -16,6 +16,7 @@ import math
 from enum import Enum
 from comfy.ops import NVIDIA_MEMORY_CONV_BUG_WORKAROUND
 
+import logging
 import comfy.ops
 ops = comfy.ops.disable_weight_init
 
@@ -446,6 +447,7 @@ class InflatedCausalConv3d(ops.Conv3d):
         self.memory_device = memory_device
         self.padding = (0, *self.padding[1:])
         self.memory_limit = float("inf")
+        self.logged_once = False
 
     def set_memory_limit(self, value: float):
         self.memory_limit = value
@@ -469,8 +471,16 @@ class InflatedCausalConv3d(ops.Conv3d):
                 return out
             except RuntimeError:
                 pass
-
-        return super()._conv_forward(input, weight, bias, *args, **kwargs)
+            except NotImplementedError:
+                pass
+        try:
+            return super()._conv_forward(input, weight, bias, *args, **kwargs)
+        except NotImplementedError:
+            # for: Could not run 'aten::cudnn_convolution' with arguments from the 'CPU' backend
+            if not self.logged_once:
+                logging.warning("VAE is on CPU for decoding. This is most likely due to being not enough memory")
+                self.logged_once = True
+            return F.conv3d(input, weight, bias, *args, **kwargs)
 
     def memory_limit_conv(
         self,
