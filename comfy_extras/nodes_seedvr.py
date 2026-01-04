@@ -78,8 +78,10 @@ def tiled_vae(x, vae_model, tile_size=(512, 512), tile_overlap=(64, 64), tempora
             else:
                 out = vae_model.decode_(t_chunk)
 
-            if isinstance(out, (tuple, list)): out = out[0]
-            if out.ndim == 4: out = out.unsqueeze(2)
+            if isinstance(out, (tuple, list)):
+                out = out[0]
+            if out.ndim == 4:
+                out = out.unsqueeze(2)
 
             if pad_amount > 0:
                 if encode:
@@ -136,13 +138,17 @@ def tiled_vae(x, vae_model, tile_size=(512, 512), tile_overlap=(64, 64), tempora
 
             if cur_ov_h > 0:
                 r = get_ramp(cur_ov_h)
-                if y_idx > 0: w_h[:cur_ov_h] = r
-                if y_end < h: w_h[-cur_ov_h:] = 1.0 - r
+                if y_idx > 0:
+                    w_h[:cur_ov_h] = r
+                if y_end < h:
+                    w_h[-cur_ov_h:] = 1.0 - r
 
             if cur_ov_w > 0:
                 r = get_ramp(cur_ov_w)
-                if x_idx > 0: w_w[:cur_ov_w] = r
-                if x_end < w: w_w[-cur_ov_w:] = 1.0 - r
+                if x_idx > 0:
+                    w_w[:cur_ov_w] = r
+                if x_end < w:
+                    w_w[-cur_ov_w:] = 1.0 - r
 
             final_weight = w_h.view(1,1,1,-1,1) * w_w.view(1,1,1,1,-1)
 
@@ -335,7 +341,8 @@ class SeedVR2InputProcessing(io.ComfyNode):
 
         comfy.model_management.load_models_gpu([vae.patcher])
         vae_model = vae.first_stage_model
-        scale = 0.9152; shift = 0
+        scale = 0.9152
+        shift = 0
         if images.dim() != 5: # add the t dim
             images = images.unsqueeze(0)
         images = images.permute(0, 1, 4, 2, 3)

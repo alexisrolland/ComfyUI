@@ -98,7 +98,7 @@ def var_attn_arg(kwargs):
     cu_seqlens_k = kwargs.get("cu_seqlens_k", cu_seqlens_q)
     max_seqlen_q = kwargs.get("max_seqlen_q", None)
     max_seqlen_k = kwargs.get("max_seqlen_k", max_seqlen_q)
-    assert cu_seqlens_q != None, "cu_seqlens_q shouldn't be None when var_length is True"
+    assert cu_seqlens_q is not None, "cu_seqlens_q shouldn't be None when var_length is True"
     return cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k
 # feedforward
 class GEGLU(nn.Module):
@@ -449,9 +449,12 @@ def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_resh
             k = k.view(1, total_tokens, heads, dim_head)
             v = v.view(1, total_tokens, heads, dim_head)
         else:
-            if q.ndim == 3: q = q.unsqueeze(0)
-            if k.ndim == 3: k = k.unsqueeze(0)
-            if v.ndim == 3: v = v.unsqueeze(0)
+            if q.ndim == 3:
+                q = q.unsqueeze(0)
+            if k.ndim == 3:
+                k = k.unsqueeze(0)
+            if v.ndim == 3:
+                v = v.unsqueeze(0)
             dim_head = q.shape[-1]
 
         target_output_shape = (q.shape[1], -1)
@@ -526,7 +529,8 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
             k = k.view(k.shape[0], heads, head_dim)
             v = v.view(v.shape[0], heads, head_dim)
 
-        b = q.size(0); dim_head = q.shape[-1]
+        b = q.size(0)
+        dim_head = q.shape[-1]
         q = torch.nested.nested_tensor_from_jagged(q, offsets=cu_seqlens_q.long())
         k = torch.nested.nested_tensor_from_jagged(k, offsets=cu_seqlens_k.long())
         v = torch.nested.nested_tensor_from_jagged(v, offsets=cu_seqlens_k.long())
