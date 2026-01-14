@@ -407,6 +407,7 @@ class SeedVR2Conditioning(io.ComfyNode):
             inputs=[
                 io.Latent.Input("vae_conditioning"),
                 io.Model.Input("model"),
+                io.Float.Input("latent_noise_scale", default=0.0, step=0.001)
             ],
             outputs=[io.Conditioning.Output(display_name = "positive"),
                      io.Conditioning.Output(display_name = "negative"),
@@ -414,7 +415,7 @@ class SeedVR2Conditioning(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, vae_conditioning, model) -> io.NodeOutput:
+    def execute(cls, vae_conditioning, model, latent_noise_scale) -> io.NodeOutput:
 
         vae_conditioning = vae_conditioning["samples"]
         device = vae_conditioning.device
@@ -425,7 +426,7 @@ class SeedVR2Conditioning(io.ComfyNode):
         noises = torch.randn_like(vae_conditioning).to(device)
         aug_noises =  torch.randn_like(vae_conditioning).to(device)
         aug_noises = noises * 0.1 + aug_noises * 0.05
-        cond_noise_scale = 0.0
+        cond_noise_scale = latent_noise_scale
         t = (
             torch.tensor([1000.0])
             * cond_noise_scale

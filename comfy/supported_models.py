@@ -1292,11 +1292,14 @@ class SeedVR2(supported_models_base.BASE):
     unet_config = {
         "image_model": "seedvr2"
     }
+    sampling_settings = {
+        "shift": 1.0,
+    }
     latent_format = comfy.latent_formats.SeedVR2
 
     vae_key_prefix = ["vae."]
     text_encoder_key_prefix = ["text_encoders."]
-    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+    supported_inference_dtypes = [torch.float16, torch.bfloat16, torch.float32]
     sampling_settings = {
         "shift": 1.0,
     }
