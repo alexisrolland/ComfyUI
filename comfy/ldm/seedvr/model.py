@@ -1353,7 +1353,8 @@ class NaDiT(nn.Module):
             pos_cond, neg_cond = pos_cond.squeeze(0), neg_cond.squeeze(0)
             txt, txt_shape = flatten([pos_cond, neg_cond])
         except:
-            txt, txt_shape = flatten([context.squeeze(0)])
+            context = self.positive_conditioning
+            txt, txt_shape = flatten([context])
 
         vid, vid_shape = flatten(x)
         cond_latent, _ = flatten(conditions)
