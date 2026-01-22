@@ -423,8 +423,12 @@ class SeedVR2Conditioning(io.ComfyNode):
         pos_cond = model.positive_conditioning
         neg_cond = model.negative_conditioning
 
-        noises = torch.randn_like(vae_conditioning).to(device)
-        aug_noises =  torch.randn_like(vae_conditioning).to(device)
+        for module in model.modules():
+            if hasattr(module, 'rope') and hasattr(module.rope, 'freqs'):
+                module.rope.freqs.data = module.rope.freqs.data.to(torch.float32)
+
+        noises = torch.randn_like(vae_conditioning, dtype=vae_conditioning.dtype).to(device)
+        aug_noises =  torch.randn_like(vae_conditioning, dtype=vae_conditioning.dtype).to(device)
         aug_noises = noises * 0.1 + aug_noises * 0.05
         cond_noise_scale = latent_noise_scale
         t = (
