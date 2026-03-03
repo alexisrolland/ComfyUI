@@ -32,9 +32,6 @@ import comfy.memory_management
 import comfy.utils
 import comfy.quant_ops
 
-import comfy_aimdo.torch
-import comfy_aimdo.model_vbar
-
 class VRAMState(Enum):
     DISABLED = 0    #No vram present: no need to move models to vram
     NO_VRAM = 1     #Very low vram: enable all the options to save vram
@@ -177,6 +174,14 @@ def is_mlu():
 def is_ixuca():
     global ixuca_available
     if ixuca_available:
+        return True
+    return False
+
+def is_wsl():
+    version = platform.uname().release
+    if version.endswith("-Microsoft"):
+        return True
+    elif version.endswith("microsoft-standard-WSL2"):
         return True
     return False
 
@@ -631,12 +636,11 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, ram_
         if not DISABLE_SMART_MEMORY:
             memory_to_free = memory_required - get_free_memory(device)
             ram_to_free = ram_required - get_free_ram()
-
-        if current_loaded_models[i].model.is_dynamic() and for_dynamic:
-            #don't actually unload dynamic models for the sake of other dynamic models
-            #as that works on-demand.
-            memory_required -= current_loaded_models[i].model.loaded_size()
-            memory_to_free = 0
+            if current_loaded_models[i].model.is_dynamic() and for_dynamic:
+                #don't actually unload dynamic models for the sake of other dynamic models
+                #as that works on-demand.
+                memory_required -= current_loaded_models[i].model.loaded_size()
+                memory_to_free = 0
         if memory_to_free > 0 and current_loaded_models[i].model_unload(memory_to_free):
             logging.debug(f"Unloading {current_loaded_models[i].model.model.__class__.__name__}")
             unloaded_model.append(i)
@@ -1199,43 +1203,6 @@ def cast_to_gathered(tensors, r, non_blocking=False, stream=None):
 
 
 def cast_to(weight, dtype=None, device=None, non_blocking=False, copy=False, stream=None, r=None):
-    if hasattr(weight, "_v"):
-        #Unexpected usage patterns. There is no reason these don't work but they
-        #have no testing and no callers do this.
-        assert r is None
-        assert stream is None
-
-        cast_geometry = comfy.memory_management.tensors_to_geometries([ weight ])
-
-        if dtype is None:
-            dtype = weight._model_dtype
-
-        signature = comfy_aimdo.model_vbar.vbar_fault(weight._v)
-        if signature is not None:
-            if comfy_aimdo.model_vbar.vbar_signature_compare(signature, weight._v_signature):
-                v_tensor = weight._v_tensor
-            else:
-                raw_tensor = comfy_aimdo.torch.aimdo_to_tensor(weight._v, device)
-                v_tensor = comfy.memory_management.interpret_gathered_like(cast_geometry, raw_tensor)[0]
-                weight._v_tensor = v_tensor
-                weight._v_signature = signature
-                #Send it over
-                v_tensor.copy_(weight, non_blocking=non_blocking)
-            return v_tensor.to(dtype=dtype)
-
-        r = torch.empty_like(weight, dtype=dtype, device=device)
-
-        if weight.dtype != r.dtype and weight.dtype != weight._model_dtype:
-            #Offloaded casting could skip this, however it would make the quantizations
-            #inconsistent between loaded and offloaded weights. So force the double casting
-            #that would happen in regular flow to make offload deterministic.
-            cast_buffer = torch.empty_like(weight, dtype=weight._model_dtype, device=device)
-            cast_buffer.copy_(weight, non_blocking=non_blocking)
-            weight = cast_buffer
-        r.copy_(weight, non_blocking=non_blocking)
-
-        return r
-
     if device is None or weight.device == device:
         if not copy:
             if dtype is None or weight.dtype == dtype:

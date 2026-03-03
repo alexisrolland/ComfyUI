@@ -308,15 +308,22 @@ class ModelPatcher:
     def get_free_memory(self, device):
         return comfy.model_management.get_free_memory(device)
 
-    def clone(self, disable_dynamic=False):
+    def get_clone_model_override(self):
+        return self.model, (self.backup, self.object_patches_backup, self.pinned)
+
+    def clone(self, disable_dynamic=False, model_override=None):
         class_ = self.__class__
-        model = self.model
         if self.is_dynamic() and disable_dynamic:
             class_ = ModelPatcher
-            temp_model_patcher = self.cached_patcher_init[0](*self.cached_patcher_init[1], disable_dynamic=True)
-            model = temp_model_patcher.model
+            if model_override is None:
+                if self.cached_patcher_init is None:
+                    raise RuntimeError("Cannot create non-dynamic delegate: cached_patcher_init is not initialized.")
+                temp_model_patcher = self.cached_patcher_init[0](*self.cached_patcher_init[1], disable_dynamic=True)
+                model_override = temp_model_patcher.get_clone_model_override()
+        if model_override is None:
+            model_override = self.get_clone_model_override()
 
-        n = class_(model, self.load_device, self.offload_device, self.model_size(), weight_inplace_update=self.weight_inplace_update)
+        n = class_(model_override[0], self.load_device, self.offload_device, self.model_size(), weight_inplace_update=self.weight_inplace_update)
         n.patches = {}
         for k in self.patches:
             n.patches[k] = self.patches[k][:]
@@ -325,12 +332,11 @@ class ModelPatcher:
         n.object_patches = self.object_patches.copy()
         n.weight_wrapper_patches = self.weight_wrapper_patches.copy()
         n.model_options = comfy.utils.deepcopy_list_dict(self.model_options)
-        n.backup = self.backup
-        n.object_patches_backup = self.object_patches_backup
         n.parent = self
-        n.pinned = self.pinned
 
         n.force_cast_weights = self.force_cast_weights
+
+        n.backup, n.object_patches_backup, n.pinned = model_override[1]
 
         # attachments
         n.attachments = {}
@@ -1429,12 +1435,9 @@ class ModelPatcherDynamic(ModelPatcher):
 
     def __init__(self, model, load_device, offload_device, size=0, weight_inplace_update=False):
         super().__init__(model, load_device, offload_device, size, weight_inplace_update)
-        #this is now way more dynamic and we dont support the same base model for both Dynamic
-        #and non-dynamic patchers.
-        if hasattr(self.model, "model_loaded_weight_memory"):
-            del self.model.model_loaded_weight_memory
         if not hasattr(self.model, "dynamic_vbars"):
             self.model.dynamic_vbars = {}
+        self.non_dynamic_delegate_model = None
         assert load_device is not None
 
     def is_dynamic(self):
@@ -1454,9 +1457,7 @@ class ModelPatcherDynamic(ModelPatcher):
 
     def loaded_size(self):
         vbar = self._vbar_get()
-        if vbar is None:
-            return 0
-        return vbar.loaded_size()
+        return (vbar.loaded_size() if vbar is not None else 0) + self.model.model_loaded_weight_memory
 
     def get_free_memory(self, device):
         #NOTE: on high condition / batch counts, estimate should have already vacated
@@ -1497,6 +1498,7 @@ class ModelPatcherDynamic(ModelPatcher):
 
         num_patches = 0
         allocated_size = 0
+        self.model.model_loaded_weight_memory = 0
 
         with self.use_ejected():
             self.unpatch_hooks()
@@ -1505,10 +1507,6 @@ class ModelPatcherDynamic(ModelPatcher):
             if vbar is not None:
                 vbar.prioritize()
 
-            #We force reserve VRAM for the non comfy-weight so we dont have to deal
-            #with pin and unpin syncrhonization which can be expensive for small weights
-            #with a high layer rate (e.g. autoregressive LLMs).
-            #prioritize the non-comfy weights (note the order reverse).
             loading = self._load_list(prio_comfy_cast_weights=True, default_device=device_to)
             loading.sort(reverse=True)
 
@@ -1551,6 +1549,9 @@ class ModelPatcherDynamic(ModelPatcher):
                     if key in self.backup:
                         comfy.utils.set_attr_param(self.model, key, self.backup[key].weight)
                     self.patch_weight_to_device(key, device_to=device_to)
+                    weight, _, _ = get_key_weight(self.model, key)
+                    if weight is not None:
+                        self.model.model_loaded_weight_memory += weight.numel() * weight.element_size()
 
                 if hasattr(m, "comfy_cast_weights"):
                     m.comfy_cast_weights = True
@@ -1576,21 +1577,15 @@ class ModelPatcherDynamic(ModelPatcher):
                     for param in params:
                         key = key_param_name_to_key(n, param)
                         weight, _, _ = get_key_weight(self.model, key)
-                        weight.seed_key = key
-                        set_dirty(weight, dirty)
-                        geometry = weight
-                        model_dtype = getattr(m, param + "_comfy_model_dtype", None) or weight.dtype
-                        geometry = comfy.memory_management.TensorGeometry(shape=weight.shape, dtype=model_dtype)
-                        weight_size = geometry.numel() * geometry.element_size()
-                        if vbar is not None and not hasattr(weight, "_v"):
-                            weight._v = vbar.alloc(weight_size)
-                            weight._model_dtype = model_dtype
-                        allocated_size += weight_size
-                    vbar.set_watermark_limit(allocated_size)
+                        if key not in self.backup:
+                            self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(weight, False)
+                        comfy.utils.set_attr_param(self.model, key, weight.to(device=device_to))
+                        self.model.model_loaded_weight_memory += weight.numel() * weight.element_size()
 
                 move_weight_functions(m, device_to)
 
-            logging.info(f"Model {self.model.__class__.__name__} prepared for dynamic VRAM loading. {allocated_size // (1024 ** 2)}MB Staged. {num_patches} patches attached.")
+            force_load_stat = f" Force pre-loaded {len(self.backup)} weights: {self.model.model_loaded_weight_memory // 1024} KB." if len(self.backup) > 0 else ""
+            logging.info(f"Model {self.model.__class__.__name__} prepared for dynamic VRAM loading. {allocated_size // (1024 ** 2)}MB Staged. {num_patches} patches attached.{force_load_stat}")
 
             self.model.device = device_to
             self.model.current_weight_patches_uuid = self.patches_uuid
@@ -1606,7 +1601,16 @@ class ModelPatcherDynamic(ModelPatcher):
         assert self.load_device != torch.device("cpu")
 
         vbar = self._vbar_get()
-        return 0 if vbar is None else vbar.free_memory(memory_to_free)
+        freed = 0 if vbar is None else vbar.free_memory(memory_to_free)
+
+        if freed < memory_to_free:
+            for key in list(self.backup.keys()):
+                bk = self.backup.pop(key)
+                comfy.utils.set_attr_param(self.model, key, bk.weight)
+            freed += self.model.model_loaded_weight_memory
+            self.model.model_loaded_weight_memory = 0
+
+        return freed
 
     def partially_unload_ram(self, ram_to_unload):
         loading = self._load_list(prio_comfy_cast_weights=True, default_device=self.offload_device)
@@ -1632,11 +1636,6 @@ class ModelPatcherDynamic(ModelPatcher):
             self.partially_unload(None, 1e32)
             for m in self.model.modules():
                 move_weight_functions(m, device_to)
-
-            keys = list(self.backup.keys())
-            for k in keys:
-                bk = self.backup[k]
-                comfy.utils.set_attr_param(self.model, k, bk.weight)
 
     def partially_load(self, device_to, extra_memory=0, force_patch_weights=False):
         assert not force_patch_weights #See above
@@ -1668,5 +1667,11 @@ class ModelPatcherDynamic(ModelPatcher):
 
     def unpatch_hooks(self, whitelist_keys_set: set[str]=None) -> None:
         pass
+
+    def get_non_dynamic_delegate(self):
+        model_patcher = self.clone(disable_dynamic=True, model_override=self.non_dynamic_delegate_model)
+        self.non_dynamic_delegate_model = model_patcher.get_clone_model_override()
+        return model_patcher
+
 
 CoreModelPatcher = ModelPatcher
