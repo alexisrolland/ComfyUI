@@ -1,0 +1,6 @@
+{
+    "model_type": "briefnet",
+    "image_std": [1.0, 1.0, 1.0],
+    "image_mean": [0.0, 0.0, 0.0],
+    "image_size": 1024
+}
