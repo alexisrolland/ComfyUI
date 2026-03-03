@@ -598,7 +598,7 @@ class manual_cast(disable_weight_init):
         comfy_cast_weights = True
 
     class BatchNorm2d(disable_weight_init.BatchNorm2d):
-        comfy_cast_weights=True
+        comfy_cast_weights = True
 
     class GroupNorm(disable_weight_init.GroupNorm):
         comfy_cast_weights = True
