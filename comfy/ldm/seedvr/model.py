@@ -8,7 +8,7 @@ from math import ceil, pi
 import torch
 from itertools import chain
 from comfy.ldm.modules.diffusionmodules.model import get_timestep_embedding
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import optimized_var_attention
 from comfy.rmsnorm import RMSNorm
 from torch.nn.modules.utils import _triple
 from torch import nn
@@ -767,19 +767,17 @@ class NaSwinAttention(NaMMAttention):
             else:
                 vid_q, vid_k = self.rope(vid_q, vid_k, window_shape, cache_win)
 
-        out = optimized_attention(
+        out = optimized_var_attention(
             q=concat_win(vid_q, txt_q),
             k=concat_win(vid_k, txt_k),
             v=concat_win(vid_v, txt_v),
-            heads=self.heads, skip_reshape=True, var_length = True,
+            heads=self.heads, skip_reshape=True,
             cu_seqlens_q=cache_win(
                 "vid_seqlens_q", lambda: safe_pad_operation(all_len_win.cumsum(0), (1, 0)).int()
             ),
             cu_seqlens_k=cache_win(
                 "vid_seqlens_k", lambda: safe_pad_operation(all_len_win.cumsum(0), (1, 0)).int()
             ),
-            max_seqlen_q=cache_win("vid_max_seqlen_q", lambda: all_len_win.max().item()),
-            max_seqlen_k=cache_win("vid_max_seqlen_k", lambda: all_len_win.max().item()),
         )
 
         vid_out, txt_out = unconcat_win(out)
