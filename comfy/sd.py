@@ -440,9 +440,7 @@ class CLIP:
 class VAE:
     def __init__(self, sd=None, device=None, config=None, dtype=None, metadata=None):
         if 'decoder.up_blocks.0.resnets.0.norm1.weight' in sd.keys(): #diffusers format
-            if (metadata is not None and metadata["keep_diffusers_format"] == "true"):
-                pass
-            else:
+            if metadata is None or metadata.get("keep_diffusers_format") != "true":
                 sd = diffusers_convert.convert_vae_state_dict(sd)
 
         if model_management.is_amd():

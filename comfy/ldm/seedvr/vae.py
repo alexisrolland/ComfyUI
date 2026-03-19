@@ -366,8 +366,6 @@ def causal_norm_wrapper(norm_layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
     raise NotImplementedError
 
 def safe_interpolate_operation(x, size=None, scale_factor=None, mode='nearest', align_corners=None, recompute_scale_factor=None):
-    """Safe interpolate operation that handles Half precision for problematic modes"""
-    # Modes qui peuvent causer des problèmes avec Half precision
     problematic_modes = ['bilinear', 'bicubic', 'trilinear']
 
     if mode in problematic_modes:
@@ -419,10 +417,8 @@ def extend_head(tensor, times: int = 2, memory = None):
         return torch.cat(tensors=(torch.tile(tensor[:, :, :1], tile_repeat), tensor), dim=2)
 
 def cache_send_recv(tensor, cache_size, times, memory=None):
-    # Single GPU inference - simplified cache handling
     recv_buffer = None
 
-    # Handle memory buffer for single GPU case
     if memory is not None:
         recv_buffer = memory.to(tensor[0])
     elif times > 0:
@@ -2051,19 +2047,6 @@ class VideoAutoencoderKL(nn.Module):
             h = self.decode(h.latent_dist.mode())
             return h.sample
 
-    def load_state_dict(self, state_dict, strict=False):
-        # Newer version of diffusers changed the model keys,
-        # causing incompatibility with old checkpoints.
-        # They provided a method for conversion.
-        # We call conversion before loading state_dict.
-        convert_deprecated_attention_blocks = getattr(
-            self, "_convert_deprecated_attention_blocks", None
-        )
-        if callable(convert_deprecated_attention_blocks):
-            convert_deprecated_attention_blocks(state_dict)
-        return super().load_state_dict(state_dict, strict)
-
-
 class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
     def __init__(
         self,
@@ -2099,16 +2082,12 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         z = p.squeeze(2)
         return z, p
 
-    def decode(self, z: torch.FloatTensor):
+    def decode(self, z):
         b, tc, h, w = z.shape
-        z = z.view(b, 16, -1, h, w)
-        z = z.movedim(1, -1)
-        latent = z.unsqueeze(0)
+        latent = z.view(b, 16, -1, h, w)
         scale = 0.9152
         shift = 0
         latent = latent / scale + shift
-        latent = rearrange(latent, "b ... c -> b c ...")
-        latent = latent.squeeze(2)
 
         if latent.ndim == 4:
             latent = latent.unsqueeze(2)

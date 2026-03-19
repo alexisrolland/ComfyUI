@@ -337,7 +337,7 @@ class SeedVR2InputProcessing(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, images, vae, resolution, spatial_tile_size, temporal_tile_size, spatial_overlap, enable_tiling):
+    def execute(cls, images, vae, resolution, spatial_tile_size, spatial_overlap, temporal_tile_size, enable_tiling):
 
         comfy.model_management.load_models_gpu([vae.patcher])
         vae_model = vae.first_stage_model
