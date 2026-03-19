@@ -39,7 +39,7 @@ except ImportError:
 
 FLASH_ATTENTION_IS_AVAILABLE = False
 try:
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
+    from flash_attn import flash_attn_func
     FLASH_ATTENTION_IS_AVAILABLE = True
 except ImportError:
     if model_management.flash_attention_enabled():
@@ -86,6 +86,7 @@ def default(val, d):
     if exists(val):
         return val
     return d
+
 
 # feedforward
 class GEGLU(nn.Module):
