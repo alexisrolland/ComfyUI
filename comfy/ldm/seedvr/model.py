@@ -9,11 +9,46 @@ import torch
 from itertools import chain
 from comfy.ldm.modules.diffusionmodules.model import get_timestep_embedding
 from comfy.ldm.modules.attention import optimized_var_attention
-from comfy.rmsnorm import RMSNorm
 from torch.nn.modules.utils import _triple
 from torch import nn
 import math
 from comfy.ldm.flux.math import apply_rope1
+import numbers
+
+class CustomRMSNorm(nn.Module):
+
+    def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True, device=None, dtype=None):
+        super(CustomRMSNorm, self).__init__()
+
+        if isinstance(normalized_shape, numbers.Integral):
+            normalized_shape = (normalized_shape,)
+        self.normalized_shape = torch.Size(normalized_shape)
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+
+        if self.elementwise_affine:
+            self.weight = nn.Parameter(torch.ones(*normalized_shape, device=device, dtype=dtype))
+        else:
+            self.register_parameter('weight', None)
+
+    def forward(self, input):
+
+        dims = tuple(range(-len(self.normalized_shape), 0))
+
+        variance = input.pow(2).mean(dim=dims, keepdim=True)
+        rms = torch.sqrt(variance + self.eps)
+
+        normalized = input / rms
+
+        if self.elementwise_affine:
+            if hasattr(torch, 'float8_e4m3fn'):
+                fp8_types = (torch.float8_e4m3fn, torch.float8_e5m2)
+                if self.weight.dtype in fp8_types:
+                    weight = self.weight.to(input.dtype)
+                    return normalized * weight
+
+            return normalized * self.weight
+        return normalized
 
 class Cache:
     def __init__(self, disable=False, prefix="", cache=None):
@@ -305,8 +340,6 @@ class RotaryEmbedding(nn.Module):
         if exists(offsets):
             assert len(offsets) == len(dims)
 
-        # get frequencies for each axis
-
         for ind, dim in enumerate(dims):
 
             offset = 0
@@ -536,14 +569,13 @@ class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):
             max_width = max(max_width, w)
             max_txt_len = max(max_txt_len, l)
 
-        # Compute frequencies for actual max dimensions needed
-        # Add small buffer to improve cache hits across similar batches
-        vid_freqs = self.get_axial_freqs(
-            min(max_temporal + 16, 1024),  # Cap at 1024, add small buffer
-            min(max_height + 4, 128),      # Cap at 128, add small buffer
-            min(max_width + 4, 128)        # Cap at 128, add small buffer
-        )
-        txt_freqs = self.get_axial_freqs(min(max_txt_len + 16, 1024))
+        with torch.cuda.amp.autocast(enabled=False):
+            vid_freqs = self.get_axial_freqs(
+                min(max_temporal + 16, 1024),  # Cap at 1024, add small buffer
+                min(max_height + 4, 128),      # Cap at 128, add small buffer
+                min(max_width + 4, 128)        # Cap at 128, add small buffer
+            ).float()
+            txt_freqs = self.get_axial_freqs(min(max_txt_len + 16, 1024))
 
         # Now slice as before
         vid_freq_list, txt_freq_list = [], []
@@ -689,6 +721,7 @@ class NaSwinAttention(NaMMAttention):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        self.version_7b = kwargs.get("version", False)
         self.window = _triple(window)
         self.window_method = window_method
         assert all(map(lambda v: isinstance(v, int) and v >= 0, self.window))
@@ -743,28 +776,32 @@ class NaSwinAttention(NaMMAttention):
         )
 
         # window rope
-        if self.rope:
-            if self.rope.mm:
-                # repeat text q and k for window mmrope
-                _, num_h, _ = txt_q.shape
-                txt_q_repeat = rearrange(txt_q, "l h d -> l (h d)")
-                txt_q_repeat = unflatten(txt_q_repeat, txt_shape)
-                txt_q_repeat = [[x] * n for x, n in zip(txt_q_repeat, window_count)]
-                txt_q_repeat = list(chain(*txt_q_repeat))
-                txt_q_repeat, txt_shape_repeat = flatten(txt_q_repeat)
-                txt_q_repeat = rearrange(txt_q_repeat, "l (h d) -> l h d", h=num_h)
+        if not self.version_7b:
+            if self.rope:
+                if self.rope.mm:
+                    # repeat text q and k for window mmrope
+                    _, num_h, _ = txt_q.shape
+                    txt_q_repeat = rearrange(txt_q, "l h d -> l (h d)")
+                    txt_q_repeat = unflatten(txt_q_repeat, txt_shape)
+                    txt_q_repeat = [[x] * n for x, n in zip(txt_q_repeat, window_count)]
+                    txt_q_repeat = list(chain(*txt_q_repeat))
+                    txt_q_repeat, txt_shape_repeat = flatten(txt_q_repeat)
+                    txt_q_repeat = rearrange(txt_q_repeat, "l (h d) -> l h d", h=num_h)
 
-                txt_k_repeat = rearrange(txt_k, "l h d -> l (h d)")
-                txt_k_repeat = unflatten(txt_k_repeat, txt_shape)
-                txt_k_repeat = [[x] * n for x, n in zip(txt_k_repeat, window_count)]
-                txt_k_repeat = list(chain(*txt_k_repeat))
-                txt_k_repeat, _ = flatten(txt_k_repeat)
-                txt_k_repeat = rearrange(txt_k_repeat, "l (h d) -> l h d", h=num_h)
+                    txt_k_repeat = rearrange(txt_k, "l h d -> l (h d)")
+                    txt_k_repeat = unflatten(txt_k_repeat, txt_shape)
+                    txt_k_repeat = [[x] * n for x, n in zip(txt_k_repeat, window_count)]
+                    txt_k_repeat = list(chain(*txt_k_repeat))
+                    txt_k_repeat, _ = flatten(txt_k_repeat)
+                    txt_k_repeat = rearrange(txt_k_repeat, "l (h d) -> l h d", h=num_h)
 
-                vid_q, vid_k, txt_q, txt_k = self.rope(
-                    vid_q, vid_k, window_shape, txt_q_repeat, txt_k_repeat, txt_shape_repeat, cache_win
-                )
-            else:
+                    vid_q, vid_k, txt_q, txt_k = self.rope(
+                        vid_q, vid_k, window_shape, txt_q_repeat, txt_k_repeat, txt_shape_repeat, cache_win
+                    )
+                else:
+                    vid_q, vid_k = self.rope(vid_q, vid_k, window_shape, cache_win)
+        else:
+            if self.rope:
                 vid_q, vid_k = self.rope(vid_q, vid_k, window_shape, cache_win)
 
         out = optimized_var_attention(
@@ -865,6 +902,7 @@ class NaMMSRTransformerBlock(nn.Module):
         **kwargs,
     ):
         super().__init__()
+        version = kwargs.get("version", False)
         dim = MMArg(vid_dim, txt_dim)
         self.attn_norm = MMModule(norm, normalized_shape=dim, eps=norm_eps, elementwise_affine=False, shared_weights=shared_weights, device=device, dtype=dtype)
 
@@ -881,6 +919,7 @@ class NaMMSRTransformerBlock(nn.Module):
             shared_weights=shared_weights,
             window=kwargs.pop("window", None),
             window_method=kwargs.pop("window_method", None),
+            version=version,
             device=device, dtype=dtype, operations=operations
         )
 
@@ -895,6 +934,7 @@ class NaMMSRTransformerBlock(nn.Module):
         )
         self.ada = MMModule(ada, dim=dim, emb_dim=emb_dim, layers=["attn", "mlp"], shared_weights=shared_weights, vid_only=is_last_layer, device=device, dtype=dtype)
         self.is_last_layer = is_last_layer
+        self.version = version
 
     def forward(
         self,
@@ -1079,7 +1119,7 @@ class AdaSingle(nn.Module):
             emb = cache(
                 f"emb_repeat_{idx}_{branch_tag}",
                 lambda: slice_inputs(
-                    torch.cat([e.repeat(l, *([1] * e.ndim)) for e, l in zip(emb, hid_len)]),
+                    torch.repeat_interleave(emb, hid_len, dim=0),
                     dim=0,
                 ),
             )
@@ -1091,10 +1131,25 @@ class AdaSingle(nn.Module):
             getattr(self, f"{layer}_gate", None),
         )
 
+        if hasattr(torch, 'float8_e4m3fn'):
+            fp8_types = (torch.float8_e4m3fn, torch.float8_e5m2)
+            target_dtype = hid.dtype
+
+            if shiftB is not None and shiftB.dtype in fp8_types:
+                shiftB = shiftB.to(target_dtype)
+            if scaleB is not None and scaleB.dtype in fp8_types:
+                scaleB = scaleB.to(target_dtype)
+            if gateB is not None and gateB.dtype in fp8_types:
+                gateB = gateB.to(target_dtype)
+
         if mode == "in":
             return hid.mul_(scaleA + scaleB).add_(shiftA + shiftB)
         if mode == "out":
-            return hid.mul_(gateA + gateB)
+            if gateB is not None:
+                return hid.mul_(gateA + gateB)
+            else:
+                return hid.mul_(gateA)
+
         raise NotImplementedError
 
 
@@ -1211,6 +1266,7 @@ class NaDiT(nn.Module):
         operations = None,
         **kwargs,
     ):
+        self._7b_version = vid_dim == 3072
         self.dtype = dtype
         factory_kwargs = {"device": device, "dtype": dtype}
         window_method = num_layers // 2 * ["720pwin_by_size_bysize","720pswin_by_size_bysize"]
@@ -1219,8 +1275,8 @@ class NaDiT(nn.Module):
         block_type = ["mmdit_sr"] * num_layers
         window = num_layers * [(4,3,3)]
         ada = AdaSingle
-        norm = RMSNorm
-        qk_norm = RMSNorm
+        norm = CustomRMSNorm
+        qk_norm = CustomRMSNorm
         if isinstance(block_type, str):
             block_type = [block_type] * num_layers
         elif len(block_type) != num_layers:
@@ -1284,6 +1340,7 @@ class NaDiT(nn.Module):
                     shared_weights=not (
                         (i < mm_layers) if isinstance(mm_layers, int) else mm_layers[i]
                     ),
+                    version = self._7b_version,
                     operations = operations,
                     **kwargs,
                     **factory_kwargs
@@ -1306,7 +1363,7 @@ class NaDiT(nn.Module):
 
         self.vid_out_norm = None
         if vid_out_norm is not None:
-            self.vid_out_norm = RMSNorm(
+            self.vid_out_norm = CustomRMSNorm(
                 normalized_shape=vid_dim,
                 eps=norm_eps,
                 elementwise_affine=True,
@@ -1320,13 +1377,6 @@ class NaDiT(nn.Module):
                 device=device, dtype=dtype
             )
 
-        self.stop_cfg_index = -1
-
-    def set_cfg_stop_index(self, cfg):
-        self.stop_cfg_index = cfg
-
-    def get_cfg_stop_index(self):
-        return self.stop_cfg_index
 
     def forward(
         self,
@@ -1345,13 +1395,15 @@ class NaDiT(nn.Module):
         conditions = conditions.view(b, 17, -1, h, w)
         x = x.movedim(1, -1)
         conditions = conditions.movedim(1, -1)
+        cache = Cache(disable=disable_cache)
 
         try:
             neg_cond, pos_cond = context.chunk(2, dim=0)
             pos_cond, neg_cond = pos_cond.squeeze(0), neg_cond.squeeze(0)
             txt, txt_shape = flatten([pos_cond, neg_cond])
         except:
-            txt, txt_shape = flatten([context.squeeze(0)])
+            context = self.positive_conditioning
+            txt, txt_shape = flatten([context])
 
         vid, vid_shape = flatten(x)
         cond_latent, _ = flatten(conditions)
@@ -1367,11 +1419,10 @@ class NaDiT(nn.Module):
         txt = self.txt_in(txt.to(next(self.txt_in.parameters()).device))
 
         vid_shape_before_patchify = vid_shape
-        vid, vid_shape = self.vid_in(vid, vid_shape)
+        vid, vid_shape = self.vid_in(vid, vid_shape, cache=cache)
 
         emb = self.emb_in(timestep, device=vid.device, dtype=vid.dtype)
 
-        cache = Cache(disable=disable_cache)
         for i, block in enumerate(self.blocks):
             if ("block", i) in blocks_replace:
                 def block_wrap(args):
