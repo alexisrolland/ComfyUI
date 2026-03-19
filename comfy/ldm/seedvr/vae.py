@@ -2060,6 +2060,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         self.temporal_downsample_factor = temporal_downsample_factor
         self.freeze_encoder = freeze_encoder
         self.original_image_video = None
+        self.enable_tiling = False
         super().__init__(*args, **kwargs)
         self.set_memory_limit(0.5, 0.5)
 
@@ -2092,8 +2093,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         if latent.ndim == 4:
             latent = latent.unsqueeze(2)
 
-        if self.tiled_args.get("enable_tiling", None) is not None:
-            self.enable_tiling = self.tiled_args.pop("enable_tiling", False)
+        self.enable_tiling = self.tiled_args.get("enable_tiling", False)
 
         if self.enable_tiling:
             x = tiled_vae(latent, self, **self.tiled_args, encode=False).squeeze(2)
