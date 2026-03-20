@@ -808,7 +808,7 @@ class NaSwinAttention(NaMMAttention):
             q=concat_win(vid_q, txt_q),
             k=concat_win(vid_k, txt_k),
             v=concat_win(vid_v, txt_v),
-            heads=self.heads, skip_reshape=True,
+            heads=self.heads, skip_reshape=True, skip_output_reshape=True,
             cu_seqlens_q=cache_win(
                 "vid_seqlens_q", lambda: safe_pad_operation(all_len_win.cumsum(0), (1, 0)).int()
             ),
