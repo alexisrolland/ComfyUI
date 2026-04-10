@@ -24,7 +24,7 @@ IMAGE_ENCODERS = {
     "siglip_vision_model": comfy.clip_model.CLIPVisionModelProjection,
     "siglip2_vision_model": comfy.clip_model.CLIPVisionModelProjection,
     "dinov2": comfy.image_encoders.dino2.Dinov2Model,
-    "briefnet": comfy.image_encoders.birefnet.BiRefNet
+    "birefnet": comfy.image_encoders.birefnet.BiRefNet
 }
 
 class ClipVisionModel():
@@ -132,7 +132,7 @@ def load_clipvision_from_sd(sd, prefix="", convert_keys=False):
             json_config = os.path.join(os.path.dirname(os.path.realpath(__file__)), "clip_vision_config_vitl.json")
 
     elif "bb.layers.1.blocks.0.attn.relative_position_index" in sd:
-        json_config = os.path.join(os.path.join(os.path.dirname(os.path.realpath(__file__)), "image_encoders"), "briefnet.json")
+        json_config = os.path.join(os.path.join(os.path.dirname(os.path.realpath(__file__)), "image_encoders"), "birefnet.json")
 
     # Dinov2
     elif 'encoder.layer.39.layer_scale2.lambda1' in sd:
