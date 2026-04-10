@@ -374,6 +374,29 @@ class GrowMask(IO.ComfyNode):
 
     expand_mask = execute  # TODO: remove
 
+class ClipVisionToMask(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="ClipVisionToMask",
+            inputs = [
+                IO.ClipVisionOutput.Input("clip_vision_output")
+            ],
+            outputs = [IO.Mask.Output("mask")]
+        )
+    @classmethod
+    def execute(cls, clip_vision_output):
+        if not isinstance(clip_vision_output, torch.Tensor):
+            mask = clip_vision_output["last_hidden_state"]
+        mask = mask.sigmoid()
+        if mask.ndim == 3:
+            mask = mask.unsqueeze(0)
+        if mask.shape[1] != 1:
+            mask = mask.movedim(-1, 1)
+        return IO.NodeOutput(mask)
+
+    clip_vision_to_mask = execute
+
 class ConcatMask(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -382,20 +405,13 @@ class ConcatMask(IO.ComfyNode):
             search_aliases=["add mask", "concat mask", "merge mask"],
             category="mask",
             inputs=[
-                IO.AnyType.Input("mask"),
+                IO.Mask.Input("mask"),
                 IO.Image.Input("image"),
             ],
             outputs=[IO.Image.Output("rgba_image"), IO.Mask.Output("input_mask")],
         )
     @classmethod
     def execute(cls, mask, image):
-        if not isinstance(mask, torch.Tensor):
-            mask = mask["last_hidden_state"]
-        mask = mask.sigmoid()
-        if mask.ndim == 3:
-            mask = mask.unsqueeze(0)
-        if mask.shape[1] != 1:
-            mask = mask.movedim(-1, 1)
         if image.shape[-1] == 3:
             image = image.movedim(-1, 1)
         target_h, target_w = image.shape[2], image.shape[3]
@@ -471,7 +487,8 @@ class MaskExtension(ComfyExtension):
             GrowMask,
             ThresholdMask,
             MaskPreview,
-            ConcatMask
+            ConcatMask,
+            ClipVisionToMask
         ]
 
 
