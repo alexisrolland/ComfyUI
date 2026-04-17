@@ -823,10 +823,6 @@ class NaSwinAttention(NaMMAttention):
         txt_out = rearrange(txt_out, "l h d -> l (h d)")
         vid_out = window_reverse(vid_out)
 
-        device = comfy.model_management.get_torch_device()
-        dtype = next(self.proj_out.parameters()).dtype
-        vid_out, txt_out = vid_out.to(device=device, dtype=dtype), txt_out.to(device=device, dtype=dtype)
-        self.proj_out = self.proj_out.to(device)
         vid_out, txt_out = self.proj_out(vid_out, txt_out)
 
         return vid_out, txt_out
@@ -866,10 +862,7 @@ class SwiGLUMLP(nn.Module):
         self.proj_in = operations.Linear(dim, hidden_dim, bias=False, device=device, dtype=dtype)
 
     def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
-        x = x.to(next(self.proj_in.parameters()).device)
-        self.proj_out = self.proj_out.to(x.device)
-        x = self.proj_out(F.silu(self.proj_in_gate(x)) * self.proj_in(x))
-        return x
+        return self.proj_out(F.silu(self.proj_in_gate(x)) * self.proj_in(x))
 
 def get_mlp(mlp_type: Optional[str] = "normal"):
     # 3b and 7b uses different mlp types
@@ -965,7 +958,6 @@ class NaMMSRTransformerBlock(nn.Module):
         vid_attn, txt_attn = self.ada(vid_attn, txt_attn, layer="attn", mode="in", **ada_kwargs)
         vid_attn, txt_attn = self.attn(vid_attn, txt_attn, vid_shape, txt_shape, cache)
         vid_attn, txt_attn = self.ada(vid_attn, txt_attn, layer="attn", mode="out", **ada_kwargs)
-        txt = txt.to(txt_attn.device)
         vid_attn, txt_attn = (vid_attn + vid), (txt_attn + txt)
 
         vid_mlp, txt_mlp = self.mlp_norm(vid_attn, txt_attn)
@@ -1188,16 +1180,11 @@ class TimeEmbedding(nn.Module):
             embedding_dim=self.sinusoidal_dim,
             flip_sin_to_cos=False,
             downscale_freq_shift=0,
-        )
-        emb = emb.to(dtype)
+        ).to(dtype)
         emb = self.proj_in(emb)
         emb = self.act(emb)
-        device = next(self.proj_hid.parameters()).device
-        emb = emb.to(device)
         emb = self.proj_hid(emb)
         emb = self.act(emb)
-        device = next(self.proj_out.parameters()).device
-        emb = emb.to(device)
         emb = self.proj_out(emb)
         return emb
 
@@ -1412,11 +1399,7 @@ class NaDiT(nn.Module):
         if txt_shape.size(-1) == 1 and self.need_txt_repeat:
             txt, txt_shape = repeat(txt, txt_shape, "l c -> t l c", t=vid_shape[:, 0])
 
-        device = next(self.parameters()).device
-        dtype = next(self.parameters()).dtype
-        txt = txt.to(device).to(dtype)
-        vid = vid.to(device).to(dtype)
-        txt = self.txt_in(txt.to(next(self.txt_in.parameters()).device))
+        txt = self.txt_in(txt)
 
         vid_shape_before_patchify = vid_shape
         vid, vid_shape = self.vid_in(vid, vid_shape, cache=cache)
