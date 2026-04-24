@@ -2458,7 +2458,9 @@ async def init_builtin_extra_nodes():
         "nodes_painter.py",
         "nodes_curve.py",
         "nodes_rtdetr.py",
-        "nodes_save_advanced.py"
+        "nodes_save_advanced.py",
+        "nodes_frame_interpolation.py",
+        "nodes_sam3.py"
     ]
 
     import_failed = []
