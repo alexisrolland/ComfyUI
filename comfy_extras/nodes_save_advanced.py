@@ -1,4 +1,3 @@
-import io
 import av
 import os
 import json
@@ -7,6 +6,7 @@ import struct
 import zlib
 import logging
 import numpy as np
+import tempfile
 import folder_paths
 from comfy_api.latest import IO
 from typing_extensions import override
@@ -181,9 +181,10 @@ class SaveImageAdvanced(IO.ComfyNode):
                     img_np = (img_tensor * 255.0).clamp(0, 255).to(torch.int32).cpu().numpy().astype(np.uint8)
                     av_fmt = 'rgba' if has_alpha else 'rgb24'
 
-                memory_buffer = io.BytesIO()
+                fd, tmp_path = tempfile.mkstemp(suffix=f".{file_format}")
+                os.close(fd)
                 container_format = "image2" if file_format in ["png", "exr"] else "avif"
-                container = av.open(memory_buffer, mode='w', format=container_format)
+                container = av.open(tmp_path, mode='w', format=container_format)
 
                 if file_format == "exr":
                     stream = container.add_stream('exr', rate=1)
@@ -223,7 +224,9 @@ class SaveImageAdvanced(IO.ComfyNode):
 
                 container.close()
 
-                final_bytes = memory_buffer.getvalue()
+                with open(tmp_path, "rb") as f:
+                    final_bytes = f.read()
+                os.remove(tmp_path)
 
                 if embed_workflow and not args.disable_metadata:
                     if file_format == "png":
