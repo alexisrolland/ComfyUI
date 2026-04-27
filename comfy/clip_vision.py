@@ -1,6 +1,7 @@
 from .utils import load_torch_file, transformers_convert, state_dict_prefix_replace
 import os
 import json
+import torch
 import logging
 
 import comfy.ops
@@ -36,6 +37,7 @@ class ClipVisionModel():
         self.image_mean = config.get("image_mean", [0.48145466, 0.4578275, 0.40821073])
         self.image_std = config.get("image_std", [0.26862954, 0.26130258, 0.27577711])
         self.model_type = config.get("model_type", "clip_vision_model")
+        self.resize_to_original = config.get("resize_to_original", False)
         self.config = config.copy()
         model_class = IMAGE_ENCODERS.get(self.model_type)
         if self.model_type == "siglip_vision_model":
@@ -59,11 +61,15 @@ class ClipVisionModel():
 
     def encode_image(self, image, crop=True):
         comfy.model_management.load_model_gpu(self.patcher)
+        H, W = image.shape[1], image.shape[2]
         if self.model_type == "siglip2_vision_model":
             pixel_values = comfy.clip_model.siglip2_preprocess(image.to(self.load_device), size=self.image_size, patch_size=self.config.get("patch_size", 16), num_patches=self.config.get("num_patches", 256), mean=self.image_mean, std=self.image_std, crop=crop).float()
         else:
             pixel_values = comfy.clip_model.clip_preprocess(image.to(self.load_device), size=self.image_size, mean=self.image_mean, std=self.image_std, crop=crop).float()
         out = self.model(pixel_values=pixel_values, intermediate_output='all' if self.return_all_hidden_states else -2)
+        if self.resize_to_original:
+            resized = torch.nn.functional.interpolate(out[0], size=(H, W), mode="bicubic", antialias=False)
+            out = (resized,) + out[1:]
 
         outputs = Output()
         outputs["last_hidden_state"] = out[0].to(comfy.model_management.intermediate_device())
