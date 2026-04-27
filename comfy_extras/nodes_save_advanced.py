@@ -12,6 +12,7 @@ from comfy_api.latest import IO
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension
 from comfy.cli_args import args
+from fractions import Fraction
 
 def create_png_chunk(chunk_type: bytes, data: bytes) -> bytes:
     """Creates a valid PNG chunk with Length, Type, Data, and CRC32."""
@@ -189,10 +190,31 @@ class SaveImageAdvanced(IO.ComfyNode):
                 if file_format == "exr":
                     stream = container.add_stream('exr', rate=1)
                     stream.pix_fmt = av_fmt
+
                 elif file_format == "avif":
-                    stream = container.add_stream('av1', rate=1)
-                    # YUV color spaces
-                    stream.pix_fmt = 'yuv444p12le' if bit_depth in["16-bit", "32-bit"] else 'yuv444p'
+                    try:
+                        stream = container.add_stream('libsvtav1', rate=1)
+                    except Exception:
+                        stream = container.add_stream('av1', rate=1)
+
+                    stream.time_base = Fraction(1, 1)
+
+                    if bit_depth in ["16-bit", "32-bit"]:
+                        stream.pix_fmt = 'yuv420p10le'
+                    else:
+                        stream.pix_fmt = 'yuv420p'
+
+                    stream.codec_context.color_range = 2
+                    stream.codec_context.colorspace = 1
+                    stream.codec_context.color_primaries = 1
+                    stream.codec_context.color_trc = 1
+
+                    stream.options = {
+                        'preset': '10',
+                        'svtav1-params': 'rc=0:qp=20:color-range=1:color-matrix=1:enable-overlays=1',
+                        'g': '1'
+                    }
+
                 elif file_format == "png":
                     stream = container.add_stream('png', rate=1)
                     stream.pix_fmt = av_fmt
@@ -208,14 +230,24 @@ class SaveImageAdvanced(IO.ComfyNode):
                 try:
                     frame = av.VideoFrame.from_ndarray(img_np, format=av_fmt)
                 except ValueError:
-                    # FFMPEG Float32 Fallback: not all ffmpeg versions are able to handle float32 format for images
-                    # float16 fallback conversion
                     logging.warning("[WARNING] Current FFMPEG Binary can't save float32 images. Fallbacking to float16")
                     img_np = (img_tensor * 65535.0).clamp(0, 65535).to(torch.int32).cpu().numpy().astype(np.uint16)
                     av_fmt = 'rgba64le' if has_alpha else 'rgb48le'
                     frame = av.VideoFrame.from_ndarray(img_np, format=av_fmt)
                     if file_format == "exr" or file_format == "png":
                         stream.pix_fmt = av_fmt
+
+                # reformat for avif
+                if file_format == "avif":
+                    frame = frame.reformat(
+                        format=stream.pix_fmt,
+                        src_colorspace=1, dst_colorspace=1,
+                        src_color_range=2, dst_color_range=2
+                    )
+                    frame.pts = 0
+                    frame.time_base = stream.time_base
+                    frame.color_range = 2
+                    frame.colorspace = 1
 
                 for packet in stream.encode(frame):
                     container.mux(packet)
@@ -245,8 +277,6 @@ class SaveImageAdvanced(IO.ComfyNode):
                 "type": "output"
             })
             counter += 1
-
-        return IO.NodeOutput(ui={"images": results})
 
 # Rec.709 to Rec.2020 Gamut Conversion Matrix
 M_709_to_2020 = torch.tensor([[0.6274, 0.3293, 0.0433],[0.0691, 0.9195, 0.0114],[0.0164, 0.0880, 0.8956]
