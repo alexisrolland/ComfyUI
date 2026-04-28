@@ -167,16 +167,14 @@ class SaveImageAdvanced(IO.ComfyNode):
                     bit_depth = "16-bit"
 
                 if bit_depth == "32-bit":
-                    img_np = img_tensor.cpu().numpy()
-                    # rgba128le handles 4x32f, gbrpf32le handles 3x32f planar
-                    av_fmt = 'rgba128le' if has_alpha else 'gbrpf32le'
+                    img_np = img_tensor.cpu().numpy().astype(np.float32)
+                    av_fmt = 'gbrapf32le' if has_alpha else 'gbrpf32le'
                 elif bit_depth == "16-bit":
-                    img_np = (img_tensor * 65535.0).clamp(0, 65535).to(torch.int32).cpu().numpy().astype(np.uint16)
-                    if file_format == "png":
-                        # png requires Big-Endian (be) for 16-bit
-                        av_fmt = 'rgba64be' if has_alpha else 'rgb48be'
-                        img_np = img_np.byteswap().view(img_np.dtype.newbyteorder('>'))
+                    if file_format == "exr":
+                        img_np = img_tensor.cpu().numpy().astype(np.float16)
+                        av_fmt = 'gbrapf16le' if has_alpha else 'gbrpf16le'
                     else:
+                        img_np = (img_tensor * 65535.0).clamp(0, 65535).to(torch.int32).cpu().numpy().astype(np.uint16)
                         av_fmt = 'rgba64le' if has_alpha else 'rgb48le'
                 else:
                     img_np = (img_tensor * 255.0).clamp(0, 255).to(torch.int32).cpu().numpy().astype(np.uint8)
@@ -217,37 +215,43 @@ class SaveImageAdvanced(IO.ComfyNode):
 
                 elif file_format == "png":
                     stream = container.add_stream('png', rate=1)
-                    stream.pix_fmt = av_fmt
+                    if bit_depth == "16-bit":
+                        stream.pix_fmt = 'rgba64be' if has_alpha else 'rgb48be'
+                    else:
+                        stream.pix_fmt = av_fmt
 
                 stream.width = width
                 stream.height = height
+                stream.time_base = Fraction(1, 1)
 
-                # planar: all red, all blue, all green instead of r, g, b, r, g, b
                 is_planar = av_fmt.startswith('gbrp') or 'p' in av_fmt.split('rgba')[-1]
                 if is_planar:
+                    if av_fmt.startswith('gbrp'):
+                        img_np = img_np[:, :, [1, 2, 0, 3]] if has_alpha else img_np[:, :, [1, 2, 0]]
                     img_np = img_np.transpose(2, 0, 1)
 
                 try:
                     frame = av.VideoFrame.from_ndarray(img_np, format=av_fmt)
                 except ValueError:
-                    logging.warning("[WARNING] Current FFMPEG Binary can't save float32 images. Fallbacking to float16")
+                    logging.warning("[WARNING] Current FFMPEG Binary can't save natively. Fallbacking.")
                     img_np = (img_tensor * 65535.0).clamp(0, 65535).to(torch.int32).cpu().numpy().astype(np.uint16)
                     av_fmt = 'rgba64le' if has_alpha else 'rgb48le'
                     frame = av.VideoFrame.from_ndarray(img_np, format=av_fmt)
-                    if file_format == "exr" or file_format == "png":
-                        stream.pix_fmt = av_fmt
 
-                # reformat for avif
-                if file_format == "avif":
-                    frame = frame.reformat(
-                        format=stream.pix_fmt,
-                        src_colorspace=1, dst_colorspace=1,
-                        src_color_range=2, dst_color_range=2
-                    )
+                # reformat for both avif and exr to ensure correct internal conversion
+                if file_format in ["avif", "exr"] or (file_format == "png" and bit_depth == "16-bit"):
+                    reformat_kwargs = {"format": stream.pix_fmt}
+                    if file_format == "avif":
+                        reformat_kwargs.update({
+                            "src_colorspace": 1, "dst_colorspace": 1,
+                            "src_color_range": 2, "dst_color_range": 2
+                        })
+                    frame = frame.reformat(**reformat_kwargs)
                     frame.pts = 0
                     frame.time_base = stream.time_base
-                    frame.color_range = 2
-                    frame.colorspace = 1
+                    if file_format == "avif":
+                        frame.color_range = 2
+                        frame.colorspace = 1
 
                 for packet in stream.encode(frame):
                     container.mux(packet)
@@ -277,6 +281,8 @@ class SaveImageAdvanced(IO.ComfyNode):
                 "type": "output"
             })
             counter += 1
+
+        return IO.NodeOutput(ui={"images": results})
 
 # Rec.709 to Rec.2020 Gamut Conversion Matrix
 M_709_to_2020 = torch.tensor([[0.6274, 0.3293, 0.0433],[0.0691, 0.9195, 0.0114],[0.0164, 0.0880, 0.8956]
