@@ -171,8 +171,9 @@ class SaveImageAdvanced(IO.ComfyNode):
                     av_fmt = 'gbrapf32le' if has_alpha else 'gbrpf32le'
                 elif bit_depth == "16-bit":
                     if file_format == "exr":
-                        img_np = img_tensor.cpu().numpy().astype(np.float16)
-                        av_fmt = 'gbrapf16le' if has_alpha else 'gbrpf16le'
+                        # default pyav build doesn't come with a codec for float16 exr format
+                        img_np = img_tensor.cpu().numpy().astype(np.float32)
+                        av_fmt = 'gbrapf32le' if has_alpha else 'gbrpf32le'
                     else:
                         img_np = (img_tensor * 65535.0).clamp(0, 65535).to(torch.int32).cpu().numpy().astype(np.uint16)
                         av_fmt = 'rgba64le' if has_alpha else 'rgb48le'
