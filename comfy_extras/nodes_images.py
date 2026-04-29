@@ -956,7 +956,7 @@ class SaveImageAdvanced(IO.ComfyNode):
                     tooltip="The prefix for the file to save. This may include formatting information such as %date:yyyy-MM-dd% or %Empty Latent Image.width% to include values from nodes.",
                 ),
                 IO.DynamicCombo.Input(
-                    "file_format",
+                    "format",
                     options=[
                         IO.DynamicCombo.Option(
                             "png", 
@@ -1023,7 +1023,7 @@ class SaveImageAdvanced(IO.ComfyNode):
         cls,
         images: Input.Image,
         filename_prefix: str,
-        file_format: dict,
+        format: dict,
         embed_workflow: bool,
         prompt=None,
         extra_pnginfo=None
@@ -1033,19 +1033,19 @@ class SaveImageAdvanced(IO.ComfyNode):
         results = list()
 
         for batch_number, image in enumerate(images):
+            # get widget values from dynamic combo
+            extension = format["format"]
+            bit_depth = format["bit_depth"]
+            color_space = format["color_space"]
+
             img_tensor = image.clone()
             height, width, num_channels = img_tensor.shape
             has_alpha = (num_channels == 4)
 
             # file pathing
             filename_with_batch_num = filename.replace("%batch_num%", str(batch_number))
-            file = f"{filename_with_batch_num}_{counter:05}.{file_format}"
+            file = f"{filename_with_batch_num}_{counter:05}.{extension}"
             file_path = os.path.join(full_output_folder, file)
-
-            # get widget values from dynamic combo
-            format = file_format["file_format"]
-            bit_depth = file_format["bit_depth"]
-            color_space = file_format["color_space"]
 
             if bit_depth == "32-bit":
                 img_np = img_tensor.cpu().numpy()
@@ -1053,7 +1053,7 @@ class SaveImageAdvanced(IO.ComfyNode):
                 av_fmt = 'rgba128le' if has_alpha else 'gbrpf32le'
             elif bit_depth == "16-bit":
                 img_np = (img_tensor * 65535.0).clamp(0, 65535).to(torch.int32).cpu().numpy().astype(np.uint16)
-                if format == "png":
+                if extension == "png":
                     # png requires Big-Endian (be) for 16-bit
                     av_fmt = 'rgba64be' if has_alpha else 'rgb48be'
                     img_np = img_np.byteswap().view(img_np.dtype.newbyteorder('>'))
@@ -1064,17 +1064,17 @@ class SaveImageAdvanced(IO.ComfyNode):
                 av_fmt = 'rgba' if has_alpha else 'rgb24'
 
             memory_buffer = io.BytesIO()
-            container_format = "image2" if format in ["png", "exr"] else "avif"
+            container_format = "image2" if extension in ["png", "exr"] else "avif"
             container = av.open(memory_buffer, mode='w', format=container_format)
 
-            if format == "exr":
+            if extension == "exr":
                 stream = container.add_stream('exr', rate=1)
                 stream.pix_fmt = av_fmt
-            elif format == "avif":
+            elif extension == "avif":
                 stream = container.add_stream('av1', rate=1)
                 # YUV color spaces
                 stream.pix_fmt = 'yuv444p12le' if bit_depth in ["16-bit", "32-bit"] else 'yuv444p'
-            elif format == "png":
+            elif extension == "png":
                 stream = container.add_stream('png', rate=1)
                 stream.pix_fmt = av_fmt
 
@@ -1095,7 +1095,7 @@ class SaveImageAdvanced(IO.ComfyNode):
                 img_np = (img_tensor * 65535.0).clamp(0, 65535).to(torch.int32).cpu().numpy().astype(np.uint16)
                 av_fmt = 'rgba64le' if has_alpha else 'rgb48le'
                 frame = av.VideoFrame.from_ndarray(img_np, format=av_fmt)
-                if file_format == "exr" or file_format == "png":
+                if extension == "exr" or extension == "png":
                     stream.pix_fmt = av_fmt
 
             for packet in stream.encode(frame):
@@ -1108,9 +1108,9 @@ class SaveImageAdvanced(IO.ComfyNode):
             final_bytes = memory_buffer.getvalue()
 
             if embed_workflow and not args.disable_metadata:
-                if format == "png":
+                if extension == "png":
                     final_bytes = _inject_metadata_png(final_bytes, prompt, extra_pnginfo)
-                elif format == "exr":
+                elif extension == "exr":
                     final_bytes = _inject_metadata_exr(final_bytes, prompt, extra_pnginfo)
                 else:
                     final_bytes = _inject_metadata_avif(final_bytes, prompt, extra_pnginfo)
