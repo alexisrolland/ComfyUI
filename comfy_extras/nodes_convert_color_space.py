@@ -1,9 +1,7 @@
-
 import torch
 from comfy_api.latest import IO
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension
-
 
 # Rec.709 to Rec.2020 Gamut Conversion Matrix
 M_709_to_2020 = torch.tensor([[0.6274, 0.3293, 0.0433],[0.0691, 0.9195, 0.0114],[0.0164, 0.0880, 0.8956]
@@ -69,7 +67,7 @@ class ConvertColorSpace(IO.ComfyNode):
             # assume Grayscale has sRGB gamma
             luma = 0.2126 * rgb[..., 0] + 0.7152 * rgb[..., 1] + 0.0722 * rgb[..., 2]
             rgb = luma.unsqueeze(-1).repeat(1, 1, 1, 3)
-            rgb = linear_to_srgb(rgb)
+            rgb = srgb_to_linear(rgb)
 
         elif source_color_space == "HDR (Rec.2020)":
             # assuming Linear Rec.2020 input. Convert to Linear Rec.709

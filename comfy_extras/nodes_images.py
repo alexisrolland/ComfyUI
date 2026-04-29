@@ -6,20 +6,28 @@ import folder_paths
 import av
 import io
 import json
-import logging
+
+import av
 import os
 import re
 import math
 import numpy as np
 import struct
 import torch
+
+import struct
 import zlib
+import tempfile
+import logging
 import comfy.utils
+import numpy as np
+from fractions import Fraction
 
 from server import PromptServer
 from comfy_api.latest import ComfyExtension, Input, IO, UI
 from comfy.cli_args import args
 from typing_extensions import override
+from comfy.cli_args import args
 
 SVG = IO.SVG.Type  # TODO: temporary solution for backward compatibility, will be removed later.
 
@@ -830,14 +838,15 @@ class ImageMergeTileList(IO.ComfyNode):
         return IO.NodeOutput(merged_image)
 
 
-def _create_png_chunk(chunk_type: bytes, data: bytes) -> bytes:
+
+def create_png_chunk(chunk_type: bytes, data: bytes) -> bytes:
     """Creates a valid PNG chunk with Length, Type, Data, and CRC32."""
     chunk = struct.pack('>I', len(data)) + chunk_type + data
     crc = zlib.crc32(chunk_type + data) & 0xffffffff
     return chunk + struct.pack('>I', crc)
 
 
-def _inject_metadata_png(png_bytes, prompt=None, extra_pnginfo=None):
+def inject_comfy_metadata_png(png_bytes, prompt=None, extra_pnginfo=None):
     # IEND chunk is the last 12 bytes of png files
     content = png_bytes[:-12]
     iend = png_bytes[-12:]
@@ -846,16 +855,16 @@ def _inject_metadata_png(png_bytes, prompt=None, extra_pnginfo=None):
 
     if prompt is not None:
         payload = b'prompt\x00' + json.dumps(prompt).encode('utf-8')
-        metadata_chunks += _create_png_chunk(b'tEXt', payload)
+        metadata_chunks += create_png_chunk(b'tEXt', payload)
 
     if extra_pnginfo is not None:
         for k, v in extra_pnginfo.items():
             payload = k.encode('utf-8') + b'\x00' + json.dumps(v).encode('utf-8')
-            metadata_chunks += _create_png_chunk(b'tEXt', payload)
+            metadata_chunks += create_png_chunk(b'tEXt', payload)
 
     return content + metadata_chunks + iend
 
-def _inject_metadata_exr(exr_bytes: bytes, prompt, extra_pnginfo) -> bytes:
+def inject_comfy_metadata_exr(exr_bytes: bytes, prompt, extra_pnginfo) -> bytes:
     # skip magic and version
     idx = 8
 
@@ -913,7 +922,7 @@ def _inject_metadata_exr(exr_bytes: bytes, prompt, extra_pnginfo) -> bytes:
     # stitch the file back together with the new header and updated table
     return exr_bytes[:table_start - 1] + payload + b'\x00' + new_table + exr_bytes[table_start + num_entries*8:]
 
-def _inject_metadata_avif(avif_bytes: bytes, prompt, extra_pnginfo) -> bytes:
+def inject_comfy_metadata_avif(avif_bytes: bytes, prompt, extra_pnginfo) -> bytes:
     metadata = {}
     if prompt is not None:
         metadata["prompt"] = prompt
@@ -933,7 +942,6 @@ def _inject_metadata_avif(avif_bytes: bytes, prompt, extra_pnginfo) -> bytes:
 
     # isobmff allows top-level boxes at the end of the file.
     return avif_bytes + uuid_box
-
 
 class SaveImageAdvanced(IO.ComfyNode):
     @classmethod
@@ -1039,84 +1047,133 @@ class SaveImageAdvanced(IO.ComfyNode):
             color_space = format["color_space"]
 
             img_tensor = image.clone()
+
             height, width, num_channels = img_tensor.shape
             has_alpha = (num_channels == 4)
 
             # file pathing
             filename_with_batch_num = filename.replace("%batch_num%", str(batch_number))
-            file = f"{filename_with_batch_num}_{counter:05}.{extension}"
+
+            file = f"{filename_with_batch_num}_{counter:05}.{file_format}"
             file_path = os.path.join(full_output_folder, file)
 
-            if bit_depth == "32-bit":
-                img_np = img_tensor.cpu().numpy()
-                # rgba128le handles 4x32f, gbrpf32le handles 3x32f planar
-                av_fmt = 'rgba128le' if has_alpha else 'gbrpf32le'
-            elif bit_depth == "16-bit":
-                img_np = (img_tensor * 65535.0).clamp(0, 65535).to(torch.int32).cpu().numpy().astype(np.uint16)
-                if extension == "png":
-                    # png requires Big-Endian (be) for 16-bit
-                    av_fmt = 'rgba64be' if has_alpha else 'rgb48be'
-                    img_np = img_np.byteswap().view(img_np.dtype.newbyteorder('>'))
+            if file_format in ["png", "exr", "avif"]:
+
+                # safe bit downcasting
+                if (file_format == "png" or file_format == "avif") and bit_depth == "32-bit":
+                    bit_depth = "16-bit"
+                if file_format == "exr" and bit_depth == "8-bit":
+                    bit_depth = "16-bit"
+
+                if bit_depth == "32-bit":
+                    img_np = img_tensor.cpu().numpy().astype(np.float32)
+                    av_fmt = 'gbrapf32le' if has_alpha else 'gbrpf32le'
+                elif bit_depth == "16-bit":
+                    if file_format == "exr":
+                        # default pyav build doesn't come with a codec for float16 exr format
+                        img_np = img_tensor.cpu().numpy().astype(np.float32)
+                        av_fmt = 'gbrapf32le' if has_alpha else 'gbrpf32le'
+                    else:
+                        img_np = (img_tensor * 65535.0).clamp(0, 65535).to(torch.int32).cpu().numpy().astype(np.uint16)
+                        av_fmt = 'rgba64le' if has_alpha else 'rgb48le'
                 else:
-                    av_fmt = 'rgba64le' if has_alpha else 'rgb48le'
-            else:
-                img_np = (img_tensor * 255.0).clamp(0, 255).to(torch.int32).cpu().numpy().astype(np.uint8)
-                av_fmt = 'rgba' if has_alpha else 'rgb24'
+                    img_np = (img_tensor * 255.0).clamp(0, 255).to(torch.int32).cpu().numpy().astype(np.uint8)
+                    av_fmt = 'rgba' if has_alpha else 'rgb24'
 
-            memory_buffer = io.BytesIO()
-            container_format = "image2" if extension in ["png", "exr"] else "avif"
-            container = av.open(memory_buffer, mode='w', format=container_format)
+                fd, tmp_path = tempfile.mkstemp(suffix=f".{file_format}")
+                os.close(fd)
+                container_format = "image2" if file_format in ["png", "exr"] else "avif"
+                container = av.open(tmp_path, mode='w', format=container_format)
 
-            if extension == "exr":
-                stream = container.add_stream('exr', rate=1)
-                stream.pix_fmt = av_fmt
-            elif extension == "avif":
-                stream = container.add_stream('av1', rate=1)
-                # YUV color spaces
-                stream.pix_fmt = 'yuv444p12le' if bit_depth in ["16-bit", "32-bit"] else 'yuv444p'
-            elif extension == "png":
-                stream = container.add_stream('png', rate=1)
-                stream.pix_fmt = av_fmt
-
-            stream.width = width
-            stream.height = height
-
-            # planar: all red, all blue, all green instead of r, g, b, r, g, b
-            is_planar = av_fmt.startswith('gbrp') or 'p' in av_fmt.split('rgba')[-1]
-            if is_planar:
-                img_np = img_np.transpose(2, 0, 1)
-
-            try:
-                frame = av.VideoFrame.from_ndarray(img_np, format=av_fmt)
-            except ValueError:
-                # FFMPEG Float32 Fallback: not all ffmpeg versions are able to handle float32 format for images
-                # float16 fallback conversion
-                logging.warning("[WARNING] Current FFMPEG Binary can't save float32 images. Fallbacking to float16")
-                img_np = (img_tensor * 65535.0).clamp(0, 65535).to(torch.int32).cpu().numpy().astype(np.uint16)
-                av_fmt = 'rgba64le' if has_alpha else 'rgb48le'
-                frame = av.VideoFrame.from_ndarray(img_np, format=av_fmt)
-                if extension == "exr" or extension == "png":
+                if file_format == "exr":
+                    stream = container.add_stream('exr', rate=1)
                     stream.pix_fmt = av_fmt
 
-            for packet in stream.encode(frame):
-                container.mux(packet)
-            for packet in stream.encode():
-                container.mux(packet)
+                elif file_format == "avif":
+                    try:
+                        stream = container.add_stream('libsvtav1', rate=1)
+                    except Exception:
+                        stream = container.add_stream('av1', rate=1)
 
-            container.close()
+                    stream.time_base = Fraction(1, 1)
 
-            final_bytes = memory_buffer.getvalue()
+                    if bit_depth in ["16-bit", "32-bit"]:
+                        stream.pix_fmt = 'yuv420p10le'
+                    else:
+                        stream.pix_fmt = 'yuv420p'
 
-            if embed_workflow and not args.disable_metadata:
-                if extension == "png":
-                    final_bytes = _inject_metadata_png(final_bytes, prompt, extra_pnginfo)
-                elif extension == "exr":
-                    final_bytes = _inject_metadata_exr(final_bytes, prompt, extra_pnginfo)
-                else:
-                    final_bytes = _inject_metadata_avif(final_bytes, prompt, extra_pnginfo)
+                    stream.codec_context.color_range = 2
+                    stream.codec_context.colorspace = 1
+                    stream.codec_context.color_primaries = 1
+                    stream.codec_context.color_trc = 1
 
-            with open(file_path, "wb") as f:
-                f.write(final_bytes)
+                    stream.options = {
+                        'preset': '10',
+                        'svtav1-params': 'rc=0:qp=20:color-range=1:color-matrix=1:enable-overlays=1',
+                        'g': '1'
+                    }
+
+                elif file_format == "png":
+                    stream = container.add_stream('png', rate=1)
+                    if bit_depth == "16-bit":
+                        stream.pix_fmt = 'rgba64be' if has_alpha else 'rgb48be'
+                    else:
+                        stream.pix_fmt = av_fmt
+
+                stream.width = width
+                stream.height = height
+                stream.time_base = Fraction(1, 1)
+
+                is_planar = av_fmt.startswith('gbrp') or 'p' in av_fmt.split('rgba')[-1]
+                if is_planar:
+                    if av_fmt.startswith('gbrp'):
+                        img_np = img_np[:, :, [1, 2, 0, 3]] if has_alpha else img_np[:, :, [1, 2, 0]]
+                    img_np = img_np.transpose(2, 0, 1)
+
+                try:
+                    frame = av.VideoFrame.from_ndarray(img_np, format=av_fmt)
+                except ValueError:
+                    logging.warning("[WARNING] Current FFMPEG Binary can't save natively. Fallbacking.")
+                    img_np = (img_tensor * 65535.0).clamp(0, 65535).to(torch.int32).cpu().numpy().astype(np.uint16)
+                    av_fmt = 'rgba64le' if has_alpha else 'rgb48le'
+                    frame = av.VideoFrame.from_ndarray(img_np, format=av_fmt)
+
+                # reformat for both avif and exr to ensure correct internal conversion
+                if file_format in ["avif", "exr"] or (file_format == "png" and bit_depth == "16-bit"):
+                    reformat_kwargs = {"format": stream.pix_fmt}
+                    if file_format == "avif":
+                        reformat_kwargs.update({
+                            "src_colorspace": 1, "dst_colorspace": 1,
+                            "src_color_range": 2, "dst_color_range": 2
+                        })
+                    frame = frame.reformat(**reformat_kwargs)
+                    frame.pts = 0
+                    frame.time_base = stream.time_base
+                    if file_format == "avif":
+                        frame.color_range = 2
+                        frame.colorspace = 1
+
+                for packet in stream.encode(frame):
+                    container.mux(packet)
+                for packet in stream.encode():
+                    container.mux(packet)
+
+                container.close()
+
+                with open(tmp_path, "rb") as f:
+                    final_bytes = f.read()
+                os.remove(tmp_path)
+
+                if embed_workflow and not args.disable_metadata:
+                    if file_format == "png":
+                        final_bytes = inject_comfy_metadata_png(final_bytes, prompt, extra_pnginfo)
+                    elif file_format == "exr":
+                        final_bytes = inject_comfy_metadata_exr(final_bytes, prompt, extra_pnginfo)
+                    else:
+                        final_bytes = inject_comfy_metadata_avif(final_bytes, prompt, extra_pnginfo)
+
+                with open(file_path, "wb") as f:
+                    f.write(final_bytes)
 
             results.append({
                 "filename": file,
@@ -1126,7 +1183,6 @@ class SaveImageAdvanced(IO.ComfyNode):
             counter += 1
 
         return IO.NodeOutput(ui={"images": results})
-
 
 class ImagesExtension(ComfyExtension):
     @override
@@ -1150,6 +1206,7 @@ class ImagesExtension(ComfyExtension):
             ImageScaleToMaxDimension,
             SplitImageToTileList,
             ImageMergeTileList,
+            SaveImageAdvanced
         ]
 
 
